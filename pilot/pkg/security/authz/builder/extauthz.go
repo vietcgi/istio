@@ -98,15 +98,6 @@ func processExtensionProvider(push *model.PushContext) map[string]*builtExtAuthz
 	return resolved
 }
 
-func notAllTheSame(names []string) bool {
-	for i := 1; i < len(names); i++ {
-		if names[i-1] != names[i] {
-			return true
-		}
-	}
-	return false
-}
-
 func getExtAuthz(resolved map[string]*builtExtAuthz, providers []string) (*builtExtAuthz, error) {
 	if resolved == nil {
 		return nil, fmt.Errorf("extension provider is either invalid or undefined")

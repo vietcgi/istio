@@ -114,9 +114,8 @@ func getExtAuthz(resolved map[string]*builtExtAuthz, providers []string) (*built
 	if len(providers) < 1 {
 		return nil, fmt.Errorf("no provider specified in authorization policy")
 	}
-	if notAllTheSame(providers) {
-		return nil, fmt.Errorf("only 1 provider can be used per workload, found multiple providers: %v", providers)
-	}
+	// Restriction removed: multiple providers per workload are now supported
+	// Each provider gets its own filter pair with provider-specific metadata matching
 
 	provider := providers[0]
 	ret, found := resolved[provider]
@@ -361,6 +360,30 @@ func generateFilterMatcher(name string) *envoy_type_matcher_v3.MetadataMatcher {
 				StringMatch: &envoy_type_matcher_v3.StringMatcher{
 					MatchPattern: &envoy_type_matcher_v3.StringMatcher_Prefix{
 						Prefix: extAuthzMatchPrefix,
+					},
+				},
+			},
+		},
+	}
+}
+
+func generateFilterMatcherForProvider(name string, provider string) *envoy_type_matcher_v3.MetadataMatcher {
+	// Generate provider-specific prefix to enable multiple CUSTOM providers per workload
+	prefix := fmt.Sprintf("%s-%s", extAuthzMatchPrefix, provider)
+	return &envoy_type_matcher_v3.MetadataMatcher{
+		Filter: name,
+		Path: []*envoy_type_matcher_v3.MetadataMatcher_PathSegment{
+			{
+				Segment: &envoy_type_matcher_v3.MetadataMatcher_PathSegment_Key{
+					Key: authzmodel.RBACExtAuthzShadowRulesStatPrefix + authzmodel.RBACShadowEffectivePolicyID,
+				},
+			},
+		},
+		Value: &envoy_type_matcher_v3.ValueMatcher{
+			MatchPattern: &envoy_type_matcher_v3.ValueMatcher_StringMatch{
+				StringMatch: &envoy_type_matcher_v3.StringMatcher{
+					MatchPattern: &envoy_type_matcher_v3.StringMatcher_Prefix{
+						Prefix: prefix,
 					},
 				},
 			},

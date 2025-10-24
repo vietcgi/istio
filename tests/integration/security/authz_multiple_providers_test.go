@@ -18,7 +18,6 @@
 package security
 
 import (
-	"fmt"
 	"testing"
 
 	"istio.io/istio/pkg/config/protocol"
@@ -395,7 +394,6 @@ func TestAuthz_MultipleCustomProviders_FilterChainVerification(t *testing.T) {
 			provider1 := allProviders[0]
 			provider2 := allProviders[1]
 
-			from := apps.Ns1.A
 			to := apps.Ns1.B
 
 			config.New(t).
@@ -414,7 +412,7 @@ func TestAuthz_MultipleCustomProviders_FilterChainVerification(t *testing.T) {
 
 			pod := workloadInstances[0].WorkloadsOrFail(t)[0]
 			podName := pod.PodName()
-			namespace := pod.Namespace()
+			namespace := to.Config().Namespace.Name()
 
 			t.Logf("Workload pod: %s/%s", namespace, podName)
 			t.Logf("Providers configured: %s, %s", provider1.Name(), provider2.Name())

@@ -33,6 +33,7 @@ These integration tests validate that multiple providers can now coexist and wor
 ## Running the Tests
 
 Run all multiple provider tests:
+
 ```bash
 go test -tags=integ ./tests/integration/security \
   -test.run=TestAuthz_MultipleCustomProviders \
@@ -41,6 +42,7 @@ go test -tags=integ ./tests/integration/security \
 ```
 
 Run a specific test:
+
 ```bash
 go test -tags=integ ./tests/integration/security \
   -test.run=TestAuthz_MultipleCustomProviders_Overlapping \
@@ -108,24 +110,28 @@ Expected: one RBAC and ext_authz filter pair per provider, ordered alphabeticall
 
 The implementation generates separate filter pairs for each provider:
 
-1. Rules are grouped by provider in `builder.go:188-190`:
+Rules are grouped by provider in `builder.go:188-190`:
+
 ```go
 providerRules := map[string]*rbacpb.RBAC{}
 providerShadowRules := map[string]*rbacpb.RBAC{}
 ```
 
-2. Each provider gets its own RBAC and ext_authz filters (`builder.go:309-350`):
-```
+Each provider gets its own RBAC and ext_authz filters (`builder.go:309-350`):
+
+```text
 [RBAC-provider1] → [ExtAuthz-provider1] → [RBAC-provider2] → [ExtAuthz-provider2]
 ```
 
-3. Provider-specific metadata matching ensures each filter only triggers for its own policies (`extauthz.go:370-392`):
+Provider-specific metadata matching ensures each filter only triggers for its own policies (`extauthz.go:370-392`):
+
 ```go
 prefix := fmt.Sprintf("%s-%s", extAuthzMatchPrefix, provider)
 ```
 
-4. Policy names include the provider identifier (`builder.go:444`):
-```
+Policy names include the provider identifier (`builder.go:444`):
+
+```text
 istio-ext-authz-{provider}-ns[namespace]-policy[name]-rule[index]
 ```
 
@@ -133,10 +139,10 @@ istio-ext-authz-{provider}-ns[namespace]-policy[name]-rule[index]
 
 When a request matches policies from multiple providers:
 
-1. Envoy evaluates each provider's RBAC filter in alphabetical order
-2. Each matching provider's ext_authz service is called
-3. The request succeeds only if ALL providers allow
-4. If ANY provider denies, the request is blocked immediately
+- Envoy evaluates each provider's RBAC filter in alphabetical order
+- Each matching provider's ext_authz service is called
+- The request succeeds only if ALL providers allow
+- If ANY provider denies, the request is blocked immediately
 
 This is implemented through the filter chain structure - each provider operates as a separate enforcement point.
 

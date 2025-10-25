@@ -369,15 +369,18 @@ func TestAuthz_MultipleCustomProviders_ProviderOrdering(t *testing.T) {
 				t.Skip("Test requires at least 2 ext_authz providers")
 			}
 
-			// Sort providers alphabetically to match implementation behavior
+			// Get two providers and ensure they are ordered alphabetically
+			providersByName := make(map[string]authz.Provider)
 			providerNames := make([]string, len(allProviders))
 			for i, p := range allProviders {
 				providerNames[i] = p.Name()
+				providersByName[p.Name()] = p
 			}
 			sort.Strings(providerNames)
 
-			provider1 := allProviders[0]
-			provider2 := allProviders[1]
+			// Select first two alphabetically ordered providers
+			provider1 := providersByName[providerNames[0]]
+			provider2 := providersByName[providerNames[1]]
 			from := apps.Ns1.A
 			to := apps.Ns1.B
 
@@ -415,18 +418,16 @@ spec:
 
 			t.ConfigIstio().YAML(to.Config().Namespace.Name(), overlappingPolicyYAML).ApplyOrFail(t)
 
-			t.NewSubTest("alphabetical-ordering-validation").Run(func(t framework.TestContext) {
-				// Verify that provider names are alphabetically sorted
-				sortedNames := []string{provider1.Name(), provider2.Name()}
-				sort.Strings(sortedNames)
-
-				if sortedNames[0] != provider1.Name() {
-					t.Fatalf("Provider1 (%s) should come before Provider2 (%s) alphabetically",
+			t.NewSubTest("verify-alphabetical-provider-selection").Run(func(t framework.TestContext) {
+				// Confirm that our test selected providers in alphabetical order
+				// This ensures we're testing the actual implementation behavior
+				if provider1.Name() >= provider2.Name() {
+					t.Fatalf("Test setup error: provider1 (%s) should come before provider2 (%s) alphabetically",
 						provider1.Name(), provider2.Name())
 				}
 
-				t.Logf("✓ Verified: Providers ordered alphabetically: %s, %s",
-					sortedNames[0], sortedNames[1])
+				t.Logf("✓ Verified: Testing with alphabetically ordered providers: %s < %s",
+					provider1.Name(), provider2.Name())
 			})
 
 			t.NewSubTest("and-semantics-with-ordered-providers").Run(func(t framework.TestContext) {
@@ -542,29 +543,39 @@ func TestAuthz_MultipleCustomProviders_FilterChainVerification(t *testing.T) {
 				t.Log("✓ Verified: Each provider handles its paths independently")
 			})
 
-			t.NewSubTest("validate-provider-ordering").Run(func(t framework.TestContext) {
-				// Verify alphabetical ordering by checking that provider names are sorted
-				sortedNames := []string{provider1.Name(), provider2.Name()}
-				sort.Strings(sortedNames)
+			t.NewSubTest("validate-filter-chain-behavior").Run(func(t framework.TestContext) {
+				// Validate that filter chain correctly routes requests to appropriate providers
+				// Test denial from each provider independently
+				from := apps.Ns1.A.Instances()[0]
 
-				t.Logf("Provider ordering (alphabetical): %v", sortedNames)
-				t.Log("✓ Verified: Providers should be processed in alphabetical order")
-				t.Log("  Implementation: builder.go:306-307 sorts provider names")
+				// Provider1 denial on /api/* path
+				from.CallOrFail(t, echo.CallOptions{
+					To: to,
+					Port: echo.Port{
+						Name: "http",
+					},
+					HTTP: echo.HTTP{
+						Path:    "/api/test",
+						Headers: headers.New().With(authz.XExtAuthz, "deny").Build(),
+					},
+					Check: check.Forbidden(protocol.HTTP),
+				})
+
+				// Provider2 denial on /admin/* path
+				from.CallOrFail(t, echo.CallOptions{
+					To: to,
+					Port: echo.Port{
+						Name: "http",
+					},
+					HTTP: echo.HTTP{
+						Path:    "/admin/test",
+						Headers: headers.New().With(authz.XExtAuthz, "deny").Build(),
+					},
+					Check: check.Forbidden(protocol.HTTP),
+				})
+
+				t.Log("✓ Verified: Filter chain correctly routes to each provider")
 			})
-
-			// Log manual verification commands for deeper inspection
-			pod := workloadInstances[0].WorkloadsOrFail(t)[0]
-			podName := pod.PodName()
-			namespace := to.Config().Namespace.Name()
-
-			t.Log("")
-			t.Log("Manual verification commands (for detailed filter chain inspection):")
-			t.Logf("  istioctl proxy-config listeners %s -n %s --port 8080 -o json | jq '.[] | .filterChains[0].filters[] | .name'",
-				podName, namespace)
-			t.Log("")
-			t.Logf("Expected metadata prefixes:")
-			t.Logf("  Provider %s: istio-ext-authz-%s-", provider1.Name(), provider1.Name())
-			t.Logf("  Provider %s: istio-ext-authz-%s-", provider2.Name(), provider2.Name())
 		})
 }
 

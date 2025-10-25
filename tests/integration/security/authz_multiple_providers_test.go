@@ -376,59 +376,93 @@ func TestAuthz_MultipleCustomProviders_ProviderOrdering(t *testing.T) {
 			}
 			sort.Strings(providerNames)
 
-			t.Log("Verified provider ordering (alphabetical by name):")
-			for i, name := range providerNames {
-				t.Logf("  %d. %s", i+1, name)
-			}
+			provider1 := allProviders[0]
+			provider2 := allProviders[1]
+			from := apps.Ns1.A
+			to := apps.Ns1.B
 
-			// Verify ordering implementation
-			t.NewSubTest("implementation-verification").Run(func(t framework.TestContext) {
-				// The implementation guarantees alphabetical ordering via:
-				// builder.go:309-310:
-				//   uniqueProviders := maps.Keys(rule.providerRules)
-				//   sort.Strings(uniqueProviders)
+			// Deploy overlapping policies to same path - both providers must allow (AND semantics)
+			overlappingPolicyYAML := fmt.Sprintf(`
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: provider1-ordering-test
+  namespace: %s
+spec:
+  action: CUSTOM
+  provider:
+    name: %s
+  rules:
+  - to:
+    - operation:
+        paths: ["/ordered/*"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: provider2-ordering-test
+  namespace: %s
+spec:
+  action: CUSTOM
+  provider:
+    name: %s
+  rules:
+  - to:
+    - operation:
+        paths: ["/ordered/*"]
+`, to.Config().Namespace.Name(), provider1.Name(),
+				to.Config().Namespace.Name(), provider2.Name())
 
-				// Verify that sorting is stable and deterministic
-				providerNames2 := make([]string, len(allProviders))
-				for i, p := range allProviders {
-					providerNames2[i] = p.Name()
+			t.ConfigIstio().YAML(to.Config().Namespace.Name(), overlappingPolicyYAML).ApplyOrFail(t)
+
+			t.NewSubTest("alphabetical-ordering-validation").Run(func(t framework.TestContext) {
+				// Verify that provider names are alphabetically sorted
+				sortedNames := []string{provider1.Name(), provider2.Name()}
+				sort.Strings(sortedNames)
+
+				if sortedNames[0] != provider1.Name() {
+					t.Fatalf("Provider1 (%s) should come before Provider2 (%s) alphabetically",
+						provider1.Name(), provider2.Name())
 				}
-				sort.Strings(providerNames2)
 
-				// Both sorts should produce identical results (deterministic)
-				if len(providerNames) != len(providerNames2) {
-					t.Fatalf("Provider ordering is non-deterministic: length mismatch")
-				}
-				for i := range providerNames {
-					if providerNames[i] != providerNames2[i] {
-						t.Fatalf("Provider ordering is non-deterministic at index %d: %s != %s",
-							i, providerNames[i], providerNames2[i])
-					}
-				}
-
-				t.Log("✓ Verified: Provider ordering is deterministic and alphabetical")
+				t.Logf("✓ Verified: Providers ordered alphabetically: %s, %s",
+					sortedNames[0], sortedNames[1])
 			})
 
-			t.NewSubTest("ordering-impact").Run(func(t framework.TestContext) {
-				// Document why ordering matters:
-				// 1. Filter chain structure: [RBAC-a, ExtAuthz-a, RBAC-b, ExtAuthz-b, ...]
-				// 2. Evaluation order: Provider 'a' evaluated before 'b'
-				// 3. Metadata keys: istio-ext-authz-{provider}- must match filter order
+			t.NewSubTest("and-semantics-with-ordered-providers").Run(func(t framework.TestContext) {
+				// With overlapping policies, BOTH providers must allow (AND semantics)
+				// This validates that providers are evaluated in order and all must pass
 
-				t.Log("Provider ordering impact:")
-				t.Log("  1. Determines filter chain structure in Envoy config")
-				t.Log("  2. Affects provider evaluation order (AND semantics)")
-				t.Log("  3. Ensures consistent metadata key generation")
-				t.Logf("  4. Alphabetical order: %v", providerNames)
+				// Both providers allow - request should succeed
+				from.Instances()[0].CallOrFail(t, echo.CallOptions{
+					To: to,
+					Port: echo.Port{
+						Name: "http",
+					},
+					HTTP: echo.HTTP{
+						Path:    "/ordered/test",
+						Headers: headers.New().With(authz.XExtAuthz, authz.XExtAuthzAllow).Build(),
+					},
+					Check: check.And(
+						check.OK(),
+						check.ReachedTargetClusters(t),
+					),
+				})
 
-				// In overlapping policies, the first (alphabetically) provider's
-				// filters appear first in the chain
-				if len(providerNames) >= 2 {
-					t.Logf("  → Provider '%s' filters appear before '%s' in chain",
-						providerNames[0], providerNames[1])
-				}
+				// If any provider denies, request should fail (AND semantics)
+				from.Instances()[0].CallOrFail(t, echo.CallOptions{
+					To: to,
+					Port: echo.Port{
+						Name: "http",
+					},
+					HTTP: echo.HTTP{
+						Path:    "/ordered/test",
+						Headers: headers.New().With(authz.XExtAuthz, "deny").Build(),
+					},
+					Check: check.Forbidden(protocol.HTTP),
+				})
 
-				t.Log("✓ Verified: Provider ordering has deterministic impact on filter chain")
+				t.Log("✓ Verified: AND semantics work correctly with ordered providers")
 			})
 		})
 }

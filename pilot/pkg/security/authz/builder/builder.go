@@ -220,7 +220,7 @@ func (b Builder) build(policies []model.AuthorizationPolicy, action rbacpb.RBAC_
 		providerRules       = map[string]*rbacpb.RBAC{}
 		providerShadowRules = map[string]*rbacpb.RBAC{}
 
-		providers                      []string
+		providers                         []string
 		hasEnforcePolicy, hasDryRunPolicy = false, false
 	)
 

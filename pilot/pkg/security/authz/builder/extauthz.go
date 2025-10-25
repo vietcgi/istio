@@ -67,6 +67,12 @@ func processExtensionProvider(push *model.PushContext) map[string]*builtExtAuthz
 		} else if _, found := resolved[config.Name]; found {
 			errs = multierror.Append(errs, fmt.Errorf("extension provider name must be unique, found duplicate: %s", config.Name))
 		}
+		// Validate provider name format to prevent issues with metadata keys and policy names
+		if config.Name != "" {
+			if err := validateProviderName(config.Name); err != nil {
+				errs = multierror.Append(errs, fmt.Errorf("invalid provider name %q: %v", config.Name, err))
+			}
+		}
 		var parsed *builtExtAuthz
 		var err error
 		// TODO(yangminzhu): Refactor and cache the ext_authz config.
@@ -96,6 +102,36 @@ func processExtensionProvider(push *model.PushContext) map[string]*builtExtAuthz
 		authzLog.Debugf("Resolved extension providers: %v", spew.Sdump(resolved))
 	}
 	return resolved
+}
+
+// validateProviderName ensures provider names are safe for use in metadata keys and policy names.
+// Provider names are used in:
+// - Metadata keys: istio-ext-authz-{provider}-...
+// - Policy names: istio-ext-authz-{provider}-ns[...]
+// - Metric labels
+// Invalid characters could cause parsing issues, metric cardinality problems, or security issues.
+func validateProviderName(name string) error {
+	if len(name) == 0 {
+		return fmt.Errorf("provider name cannot be empty")
+	}
+	if len(name) > 63 {
+		return fmt.Errorf("provider name too long (max 63 characters): %d", len(name))
+	}
+	// Provider names must be DNS-1123 label compatible (alphanumeric plus dash)
+	// This ensures they work safely in metadata keys, policy names, and metrics
+	for i, c := range name {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' {
+			continue
+		}
+		if c >= 'A' && c <= 'Z' {
+			return fmt.Errorf("uppercase letters not allowed (use lowercase): character %q at position %d", c, i)
+		}
+		return fmt.Errorf("invalid character %q at position %d (only lowercase letters, digits, and hyphens allowed)", c, i)
+	}
+	if name[0] == '-' || name[len(name)-1] == '-' {
+		return fmt.Errorf("provider name cannot start or end with hyphen")
+	}
+	return nil
 }
 
 func getExtAuthz(resolved map[string]*builtExtAuthz, providers []string) (*builtExtAuthz, error) {

@@ -171,63 +171,95 @@ func shadowRuleStatPrefix(rule *rbacpb.RBAC) string {
 	}
 }
 
+// selectProviderRuleSet initializes and selects the appropriate RBAC rule set for a provider.
+// For CUSTOM policies, each provider maintains separate enforce and dry-run rule sets.
+// Returns: (selectedRuleSet, hasEnforcePolicy, hasDryRunPolicy)
+func selectProviderRuleSet(
+	providerName string,
+	action rbacpb.RBAC_Action,
+	policy model.AuthorizationPolicy,
+	logger *AuthzLogger,
+	providerRules map[string]*rbacpb.RBAC,
+	providerShadowRules map[string]*rbacpb.RBAC,
+) (*rbacpb.RBAC, bool, bool) {
+	// Initialize provider-specific rules if needed
+	if _, ok := providerRules[providerName]; !ok {
+		providerRules[providerName] = &rbacpb.RBAC{
+			Action:   action,
+			Policies: map[string]*rbacpb.Policy{},
+		}
+		providerShadowRules[providerName] = &rbacpb.RBAC{
+			Action:   action,
+			Policies: map[string]*rbacpb.Policy{},
+		}
+	}
+
+	// Select appropriate rule set based on dry-run annotation
+	if isDryRun(policy, logger) {
+		return providerShadowRules[providerName], false, true
+	}
+	return providerRules[providerName], true, false
+}
+
 func (b Builder) build(policies []model.AuthorizationPolicy, action rbacpb.RBAC_Action, forTCP bool, logger *AuthzLogger) *builtRule {
 	if len(policies) == 0 {
 		return nil
 	}
 
-	enforceRules := &rbacpb.RBAC{
-		Action:   action,
-		Policies: map[string]*rbacpb.Policy{},
-	}
-	shadowRules := &rbacpb.RBAC{
-		Action:   action,
-		Policies: map[string]*rbacpb.Policy{},
-	}
+	// Use var block for cleaner variable declarations (reviewer suggestion)
+	var (
+		enforceRules = &rbacpb.RBAC{
+			Action:   action,
+			Policies: map[string]*rbacpb.Policy{},
+		}
+		shadowRules = &rbacpb.RBAC{
+			Action:   action,
+			Policies: map[string]*rbacpb.Policy{},
+		}
+		// For CUSTOM policies, track provider-specific rules
+		providerRules       = map[string]*rbacpb.RBAC{}
+		providerShadowRules = map[string]*rbacpb.RBAC{}
 
-	// For CUSTOM policies, track provider-specific rules
-	providerRules := map[string]*rbacpb.RBAC{}
-	providerShadowRules := map[string]*rbacpb.RBAC{}
+		providers                      []string
+		hasEnforcePolicy, hasDryRunPolicy = false, false
+	)
 
-	var providers []string
 	filterType := "HTTP"
 	if forTCP {
 		filterType = "TCP"
 	}
-	hasEnforcePolicy, hasDryRunPolicy := false, false
-	for _, policy := range policies {
-		var currentRule *rbacpb.RBAC
-		var providerName string
 
-		if b.option.IsCustomBuilder {
+	for _, policy := range policies {
+		var (
+			currentRule  *rbacpb.RBAC
+			providerName string
+		)
+
+		// Use switch statement for clearer control flow (reviewer suggestion)
+		switch {
+		case b.option.IsCustomBuilder:
 			providerName = policy.Spec.GetProvider().GetName()
 			providers = append(providers, providerName)
 
-			// Initialize provider-specific rules if needed
-			if _, ok := providerRules[providerName]; !ok {
-				providerRules[providerName] = &rbacpb.RBAC{
-					Action:   action,
-					Policies: map[string]*rbacpb.Policy{},
-				}
-				providerShadowRules[providerName] = &rbacpb.RBAC{
-					Action:   action,
-					Policies: map[string]*rbacpb.Policy{},
-				}
-			}
+			// Ensure provider-specific rule sets exist and select the appropriate one
+			var hasEnforce, hasDryRun bool
+			currentRule, hasEnforce, hasDryRun = selectProviderRuleSet(
+				providerName, action, policy, logger,
+				providerRules, providerShadowRules)
 
-			// Select provider-specific rule set
-			if isDryRun(policy, logger) {
-				currentRule = providerShadowRules[providerName]
-				hasDryRunPolicy = true
-			} else {
-				currentRule = providerRules[providerName]
+			if hasEnforce {
 				hasEnforcePolicy = true
 			}
-		} else {
-			if isDryRun(policy, logger) {
+			if hasDryRun {
+				hasDryRunPolicy = true
+			}
+
+		default: // Non-CUSTOM policies (ALLOW/DENY/AUDIT)
+			switch {
+			case isDryRun(policy, logger):
 				currentRule = shadowRules
 				hasDryRunPolicy = true
-			} else {
+			default:
 				currentRule = enforceRules
 				hasEnforcePolicy = true
 			}
@@ -326,6 +358,20 @@ func (b Builder) buildHTTP(rule *builtRule, logger *AuthzLogger) []*hcm.HttpFilt
 		// can utilize these metadata to trigger the enforcement conditionally.
 		// See https://docs.google.com/document/d/1V4mCQCw7mlGp0zSQQXYoBdbKMDnkPOjeyUb85U07iSI/edit#bookmark=kix.jdq8u0an2r6s
 		// for more details.
+		//
+		// For CUSTOM action, the RBAC filter never enforces - it only evaluates and stores results in metadata:
+		// - providerRules (non-dry-run policies) → ShadowRules with "istio_ext_authz_" prefix
+		//   - RBAC evaluates and stores metadata with policy name: "istio-ext-authz-{provider}-..."
+		//   - ext_authz checks for this metadata prefix and calls the authorization service
+		//   - ext_authz enforces the decision (allow/deny)
+		//
+		// - providerShadowRules (dry-run policies) → Rules with same metadata prefix
+		//   - RBAC evaluates and stores metadata with same policy name format
+		//   - ext_authz sees the metadata and triggers (limitation: dry-run CUSTOM policies still call ext_authz)
+		//   - TODO: Future improvement could use different prefix to distinguish dry-run from enforce
+		//
+		// Note: Both Rules and ShadowRules in RBAC can be evaluated simultaneously. For CUSTOM action,
+		// neither enforces - they only populate metadata for ext_authz to check.
 		rbac := &rbachttp.RBAC{
 			ShadowRules:           providerRules,
 			ShadowRulesStatPrefix: authzmodel.RBACExtAuthzShadowRulesStatPrefix,
@@ -398,6 +444,11 @@ func (b Builder) buildTCP(rule *builtRule, logger *AuthzLogger) []*listener.Filt
 			continue
 		}
 
+		// For CUSTOM action on TCP, same logic as HTTP:
+		// - RBAC filter evaluates but doesn't enforce
+		// - Results stored in metadata for ext_authz to check
+		// - providerRules (enforce) → ShadowRules
+		// - providerShadowRules (dry-run) → Rules (see HTTP comment for limitation)
 		rbac := &rbactcp.RBAC{
 			ShadowRules:           providerRules,
 			StatPrefix:            authzmodel.RBACTCPFilterStatPrefix,
